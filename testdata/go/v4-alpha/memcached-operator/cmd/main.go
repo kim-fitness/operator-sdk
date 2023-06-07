@@ -31,11 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
-
 	cachev1alpha1 "github.com/example/memcached-operator/api/v1alpha1"
-	"github.com/example/memcached-operator/controllers"
-	"github.com/example/memcached-operator/monitoring"
+	"github.com/example/memcached-operator/internal/controller"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -48,10 +45,6 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(cachev1alpha1.AddToScheme(scheme))
-
-	utilruntime.Must(monitoringv1.AddToScheme(scheme))
-
-	monitoring.RegisterMetrics()
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -96,9 +89,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.MemcachedReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
+	if err = (&controller.MemcachedReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		// Add a Recorder to the reconciler.
+		// This allows the operator author to emit events during reconcilliation.
 		Recorder: mgr.GetEventRecorderFor("memcached-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Memcached")

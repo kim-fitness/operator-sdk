@@ -74,7 +74,7 @@ func (mh *Memcached) Prepare() {
 // Run the steps to create the Memcached with metrics and webhooks Go Sample
 func (mh *Memcached) Run() {
 
-	if strings.Contains(mh.ctx.Dir, "v4-alpha") {
+	if !mh.isV3() {
 		log.Infof("creating the v4-alpha project")
 		err := mh.ctx.Init(
 			"--plugins", "go/v4-alpha",
@@ -144,6 +144,8 @@ func (mh *Memcached) Run() {
 		mh.uncommentManifestsKustomizationv3()
 	}
 
+	mh.customizingMain()
+
 	mh.implementingE2ETests()
 
 	cmd := exec.Command("go", "mod", "tidy")
@@ -175,6 +177,11 @@ func (mh *Memcached) Run() {
 
 	// Clean up built binaries, if any.
 	pkg.CheckError("cleaning up", os.RemoveAll(filepath.Join(mh.ctx.Dir, "bin")))
+}
+
+// isV3 checks if the golang plugin version is v3 or v4
+func (mh *Memcached) isV3() bool {
+	return strings.Contains(mh.ctx.Dir, "go/v3")
 }
 
 // uncommentDefaultKustomizationV3 will uncomment code in config/default/kustomization.yaml
@@ -427,10 +434,16 @@ func (mh *Memcached) implementingWebhooks() {
 	pkg.CheckError("adding imports", err)
 }
 
-// implementingController will customize the Controller
+// implementingController will customizations in the Controller
 func (mh *Memcached) implementingController() {
-	controllerPath := filepath.Join(mh.ctx.Dir, "controllers", fmt.Sprintf("%s_controller.go",
-		strings.ToLower(mh.ctx.Kind)))
+	var controllerPath string
+	if mh.isV3() {
+		controllerPath = filepath.Join(mh.ctx.Dir, "controllers", fmt.Sprintf("%s_controller.go",
+			strings.ToLower(mh.ctx.Kind)))
+	} else {
+		controllerPath = filepath.Join(mh.ctx.Dir, "internal", "controller", fmt.Sprintf("%s_controller.go",
+			strings.ToLower(mh.ctx.Kind)))
+	}
 
 	err := kbutil.InsertCode(controllerPath,
 		`						SecurityContext: &corev1.SecurityContext{`, userIDWarningFragment)
@@ -469,7 +482,7 @@ func (mh *Memcached) implementingMonitoring() {
 	mh.customizingController()
 
 	log.Infof("customizing Main")
-	mh.customizingMain()
+	mh.customizingMainMonitoring()
 
 	log.Infof("customizing Dockerfile")
 	mh.customizingDockerfile()
@@ -719,8 +732,15 @@ func (mh *Memcached) implementingPrometheusRBAC() {
 
 // customizingController will customize the Controller to include monitoring
 func (mh *Memcached) customizingController() {
-	controllerPath := filepath.Join(mh.ctx.Dir, "controllers", fmt.Sprintf("%s_controller.go",
-		strings.ToLower(mh.ctx.Kind)))
+	var controllerPath string
+
+	if mh.isV3() {
+		controllerPath = filepath.Join(mh.ctx.Dir, "controllers", fmt.Sprintf("%s_controller.go",
+			strings.ToLower(mh.ctx.Kind)))
+	} else {
+		controllerPath = filepath.Join(mh.ctx.Dir, "internal", "controller", fmt.Sprintf("%s_controller.go",
+			strings.ToLower(mh.ctx.Kind)))
+	}
 
 	// Add monitoring imports
 	err := kbutil.InsertCode(controllerPath,
@@ -766,20 +786,45 @@ func (mh *Memcached) customizingController() {
 	pkg.CheckError("adding metric incrementation", err)
 }
 
-// customizingMain will customize main.go to register metrics
+// customizingMain will add comments to main
 func (mh *Memcached) customizingMain() {
-	mainPath := filepath.Join(mh.ctx.Dir, "main.go")
+	var mainPath string
+
+	if mh.isV3() {
+		mainPath = filepath.Join(mh.ctx.Dir, "main.go")
+	} else {
+		mainPath = filepath.Join(mh.ctx.Dir, "cmd", "main.go")
+	}
+
+	err := kbutil.InsertCode(mainPath,
+		"Scheme:   mgr.GetScheme(),",
+		mainRecorderFragment)
+	pkg.CheckError("adding recorder fragment", err)
+}
+
+// customizingMainMonitoring will customize main.go to register metrics
+func (mh *Memcached) customizingMainMonitoring() {
+	var mainPath string
+
+	marker := "\"github.com/example/memcached-operator/"
+	if mh.isV3() {
+		mainPath = filepath.Join(mh.ctx.Dir, "main.go")
+		marker += "controllers\""
+	} else {
+		mainPath = filepath.Join(mh.ctx.Dir, "cmd", "main.go")
+		marker += "internal/controller\""
+	}
+
+	err := kbutil.InsertCode(mainPath,
+		marker,
+		monitoringImportFragment)
+	pkg.CheckError("adding monitoringv1 import", err)
 
 	// Add monitoring imports
-	err := kbutil.InsertCode(mainPath,
+	err = kbutil.InsertCode(mainPath,
 		`"sigs.k8s.io/controller-runtime/pkg/log/zap"`,
 		monitoringv1ImportFragment)
 	pkg.CheckError("adding monitoringv1 import", err)
-
-	err = kbutil.InsertCode(mainPath,
-		`"github.com/example/memcached-operator/controllers"`,
-		monitoringImportFragment)
-	pkg.CheckError("adding monitoring import", err)
 
 	// Add monitoring parts
 	err = kbutil.InsertCode(mainPath,
@@ -793,8 +838,15 @@ func (mh *Memcached) customizingDockerfile() {
 	dockerfilePath := filepath.Join(mh.ctx.Dir, "Dockerfile")
 
 	// Copy monitoring
+	var ctrlCopy string
+	if mh.isV3() {
+		ctrlCopy = "controllers/"
+	} else {
+		ctrlCopy = "internal/controller/"
+	}
+
 	err := kbutil.InsertCode(dockerfilePath,
-		"COPY controllers/ controllers/",
+		fmt.Sprintf("COPY %s %s", ctrlCopy, ctrlCopy),
 		"\nCOPY monitoring/ monitoring/")
 	pkg.CheckError("adding COPY monitoring/", err)
 }
@@ -1350,6 +1402,10 @@ const controllerPrometheusRuleFragment = `
 	// is applied on the cluster if not we return nil to stop the reconciliation
 	memcached := &cachev1alpha1.Memcached{}
 	err = r.Get(ctx, req.NamespacedName, memcached)`
+
+const mainRecorderFragment = `
+// Add a Recorder to the reconciler.
+// This allows the operator author to emit events during reconcilliation.`
 
 const monitoringv1ImportFragment = `
 
